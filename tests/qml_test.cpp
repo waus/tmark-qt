@@ -1,7 +1,9 @@
 #include <QGuiApplication>
 #include <QClipboard>
+#include <QDateTime>
 #include <QEventLoop>
 #include <QFile>
+#include <QLocale>
 #include <QQmlComponent>
 #include <QQmlEngine>
 #include <QQuickItem>
@@ -9,6 +11,7 @@
 #include <QRegularExpression>
 #include <QTextDocument>
 #include <QTimer>
+#include <QTimeZone>
 
 #include <iostream>
 #include <memory>
@@ -73,6 +76,42 @@ TmarkView {
     spoiler->setProperty("sourceHtml", inlineHtml);
     if (!QMetaObject::invokeMethod(spoiler.get(), "linkActivated", Q_ARG(QString, QStringLiteral("tmark-copy:copy%20me"))) ||
         app.clipboard()->text() != QStringLiteral("copy me")) return 1;
+    struct DateCase { const char* id; bool valid; int offset = 0; const char* named = nullptr; };
+    for (const DateCase test : {
+            DateCase{"", true}, {"UTC", true}, {"GMT", true}, {"Z", true},
+            {"America/New_York", true, 0, "America/New_York"}, {"US/Eastern", true, 0, "US/Eastern"},
+            {"Etc/GMT+3", true, 0, "Etc/GMT+3"}, {"UCT", true, 0, "UCT"},
+            {"Cuba", true, 0, "Cuba"}, {"Zulu", true, 0, "Zulu"},
+            {"+03:00", true, 10800}, {"-03:30", true, -12600}, {"UTC+03:00", true, 10800},
+            {"UTC+2", true, 7200}, {"UTC-3:30", true, -12600}, {"UTC+02:30", true, 9000},
+            {"+23:59", true, 86340}, {"UTC-23:59", true, -86340}, {"-00:00", true},
+            {"PST", false}, {"CST", false}, {"IST", false}, {"MSK", false},
+            {"Unknown/Zone", false}, {"Local", false}, {"localtime", false}, {"posixrules", false},
+            {"GMT+2", false}, {"GMT+03:00", false}, {"utc+2", false}, {"gmt+2", false},
+            {"UTC+24", false}, {"+24:00", false},
+            {"UTC+2:60", false}, {"+3:00", false}, {"UTC+2:3", false}, {"UTC+0230", false},
+            {"UTC+", false}, {"utc", false}, {"z", false}, {" UTC", false}, {"UTC ", false},
+            {"UTC\n", false}, {"UTC+２", false}, {"posix/UTC", false}, {"right/UTC", false},
+            {"/etc/localtime", false}, {"../UTC", false}, {"EST5EDT,M3.2.0,M11.1.0", false}}) {
+        const QString timezone = QString::fromUtf8(test.id);
+        for (const double seconds : {0.0, 1609459200.0, 1625097600.5, -0.5}) {
+            for (const bool omit : {false, true}) {
+                if (omit && !timezone.isEmpty()) continue;
+                const QString timestamp = QString::number(seconds, 'g', 16);
+                view->setProperty("text", "{document;#url{x}#title{Date}{p;{datetime;" +
+                    (omit ? QString() : "#timezone{" + timezone + "}") + timestamp + "}}}");
+                app.processEvents();
+                const auto dateHtml = view->property("parsedDocument").toMap().value("children").toList()[0].toMap().value("html").toString();
+                const QString id = timezone.isEmpty() ? QString("UTC") : timezone;
+                auto date = QDateTime::fromMSecsSinceEpoch(qint64(seconds * 1000), QTimeZone::utc());
+                date = test.named ? date.toTimeZone(QTimeZone(test.named)) : date.addSecs(test.offset);
+                const auto expected = test.valid
+                    ? (QLocale().toString(date, QLocale::ShortFormat) + " " + id).toHtmlEscaped()
+                    : (timestamp + " " + id).toHtmlEscaped();
+                if (dateHtml != expected) { std::cerr << "datetime " << timezone.toStdString() << ": " << dateHtml.toStdString() << '\n'; return 1; }
+            }
+        }
+    }
     QQmlComponent galleryComponent(&engine);
     galleryComponent.setData("import io.github.waus.tmark; TmarkGallery { width: 420; theme: TmarkViewTheme {} }", QUrl());
     std::unique_ptr<QObject> gallery(galleryComponent.create());

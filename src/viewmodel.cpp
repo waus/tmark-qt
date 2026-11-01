@@ -5,6 +5,8 @@
 #include <QUrl>
 #include <QDateTime>
 #include <QLocale>
+#include <QRegularExpression>
+#include <QTimeZone>
 
 #include <cmath>
 #include <limits>
@@ -58,13 +60,39 @@ QString inlineNode(const tmark::Node& node, const QHash<QString, QUrl>& icons, Q
         return escaped(namedText("alt"));
     }
     if (tag == "datetime") {
+        const auto timezone = namedText("timezone");
+        const auto id = timezone.isEmpty() ? QByteArray("UTC") : timezone.toUtf8();
         bool ok = false;
         const double seconds = contentText(node.content).toDouble(&ok);
-        if (ok && std::isfinite(seconds) &&
+        static const QRegularExpression offsetPattern(QStringLiteral(
+            "\\A(?:UTC([+-])([0-9]{1,2})(?::([0-9]{2}))?|([+-])([0-9]{2}):([0-9]{2}))\\z"));
+        const auto match = offsetPattern.match(QString::fromUtf8(id));
+        const bool prefixed = !match.captured(1).isEmpty();
+        const int hours = match.captured(prefixed ? 2 : 5).toInt();
+        const int minutes = match.captured(prefixed ? 3 : 6).toInt();
+        const bool fixed = id == "UTC" || id == "GMT" || id == "Z" ||
+            (match.hasMatch() && hours < 24 && minutes < 60);
+        static const QRegularExpression namePattern(QStringLiteral("\\A[A-Za-z0-9_+-]+(?:/[A-Za-z0-9_+-]+)*\\z"));
+        static const QRegularExpression abbreviationPattern(QStringLiteral("\\A[A-Za-z]{2,4}\\z"));
+        static const QSet<QByteArray> shortNames = {"CET", "Cuba", "EET", "EST", "Eire", "GB", "GMT", "HST", "Iran",
+            "MET", "MST", "NZ", "PRC", "ROC", "ROK", "UCT", "UTC", "WET", "Zulu"};
+        const auto upper = id.toUpper();
+        const bool named = !match.hasMatch() && !upper.startsWith("UTC+") && !upper.startsWith("UTC-") &&
+            !upper.startsWith("GMT+") && !upper.startsWith("GMT-") &&
+            id != "Local" && id != "localtime" && id != "posixrules" &&
+            !id.startsWith("posix/") && !id.startsWith("right/") &&
+            namePattern.match(QString::fromUtf8(id)).hasMatch() &&
+            (!abbreviationPattern.match(QString::fromUtf8(id)).hasMatch() || shortNames.contains(id)) &&
+            QTimeZone::isTimeZoneIdAvailable(id);
+        if ((fixed || named) && ok && std::isfinite(seconds) &&
             seconds > double(std::numeric_limits<qint64>::min()) / 1000 &&
-            seconds < double(std::numeric_limits<qint64>::max()) / 1000)
-            return escaped(QLocale().toString(QDateTime::fromMSecsSinceEpoch(qint64(seconds * 1000)).toLocalTime(), QLocale::ShortFormat));
-        return escaped(contentText(node.content));
+            seconds < double(std::numeric_limits<qint64>::max()) / 1000) {
+            auto date = QDateTime::fromMSecsSinceEpoch(qint64(seconds * 1000), QTimeZone::utc());
+            if (fixed) date = date.addSecs((hours * 3600 + minutes * 60) * (match.captured(prefixed ? 1 : 4) == "-" ? -1 : 1));
+            else date = date.toTimeZone(QTimeZone(id));
+            if (date.isValid()) return escaped(QLocale().toString(date, QLocale::ShortFormat) + " " + QString::fromUtf8(id));
+        }
+        return escaped(contentText(node.content) + " " + QString::fromUtf8(id));
     }
     return inner.isEmpty() ? escaped(QString::fromStdString(node.raw)) : inner;
 }
